@@ -2,57 +2,123 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-type Mode = "legacy" | "protected";
-type Scenario = "ghost" | "overlap";
+type Vehicle = "A" | "B" | "C" | "D" | "E";
+type ScenarioKey = "doubleStation" | "staleSignal" | "simultaneousRequest" | "misroutedSignal";
 
-const scenarios = {
-  ghost: {
-    eyebrow: "CASE 01 · STALE HANDSHAKE",
-    title: "A vehicle leaves. Its IO does not.",
-    subtitle: "Reproduce the exact lock described in the PACK line incident report.",
+type Position = { x: number; y: number };
+
+type SimulationStep = {
+  time: string;
+  label: string;
+  owner: string;
+  plc: string;
+  signals: string[];
+  note: string;
+  positions: Partial<Record<Vehicle, Position>>;
+  status: string;
+  station: string;
+  trace: string;
+  fault?: boolean;
+};
+
+type Scenario = {
+  number: string;
+  tab: string;
+  eyebrow: string;
+  title: string;
+  subtitle: string;
+  rootCause: string;
+  impact: string;
+  steps: SimulationStep[];
+};
+
+const scenarios: Record<ScenarioKey, Scenario> = {
+  doubleStation: {
+    number: "01",
+    tab: "Double-car station",
+    eyebrow: "CASE 01 · STALE IO CASCADE",
+    title: "One ghost handshake creates a two-car station loop.",
+    subtitle: "The full sequence from the updated incident report: diversion, partial reset, manual PLC restart, then a second vehicle is admitted into an occupied station.",
+    rootCause: "A PLC sequence is restarted without restoring the ownership of the original vehicle transaction.",
+    impact: "B reaches the station first. C is then permitted by the restarted flow, but is blocked by B. The PLC combines C’s request with B’s arrival/action signals and treats them as one vehicle.",
     steps: [
-      { time: "00:00", label: "A requests station entry", owner: "A", plc: "Enter permitted", signals: ["enter_request", "permission_to_enter"], note: "PLC opens an entry transaction." },
-      { time: "00:02", label: "Operator pulls A from the loop", owner: "A", plc: "Waiting for entering", signals: ["enter_request"], note: "The vehicle is moved, but the handshake is not cancelled." },
-      { time: "00:04", label: "A sends a late entering signal", owner: "A", plc: "Permission reset", signals: ["entering"], note: "Legacy PLC accepts the stale bit and drops enter permission." },
-      { time: "00:06", label: "B requests the same station", owner: "B", plc: "Blocked", signals: ["entering", "enter_request"], note: "PLC sees entering=true and cannot distinguish A from B." },
-      { time: "00:08", label: "Line remains interlocked", owner: "B", plc: "IO conflict", signals: ["entering", "enter_request"], note: "B stops although the station is physically clear." },
+      { time: "00:00", label: "A requests entry", owner: "A", plc: "Entry permission → A", signals: ["enter_request", "permission_to_enter"], note: "PLC opens an entry phase. Its memory is phase-based; it does not identify the vehicle that owns it.", positions: { A: { x: 31, y: 18 } }, status: "A AUTHORIZED", station: "READY", trace: "A: request → PLC: permission" },
+      { time: "00:02", label: "A is pulled from the loop", owner: "A", plc: "Transaction remains open", signals: ["enter_request"], note: "A is physically diverted, but its RCS–PLC handshake remains in the process state.", positions: { A: { x: 12, y: 18 } }, status: "A DIVERTED · IO STILL LIVE", station: "READY", trace: "A moved physically; A IO was not cancelled" },
+      { time: "00:04", label: "A leaves a late entering bit", owner: "A", plc: "Entry permission reset", signals: ["entering"], note: "The stale entering bit is accepted as the acknowledgement for the old permission and resets the entry grant.", positions: { A: { x: 13, y: 18 }, B: { x: 34, y: 67 } }, status: "STALE ENTERING", station: "READY", trace: "A: entering = 1 → permission_to_enter = 0", fault: true },
+      { time: "00:06", label: "B requests the same station", owner: "B", plc: "B has no valid grant", signals: ["entering", "enter_request"], note: "B’s request overlaps A’s orphaned entering phase. PLC will not issue B a clean permission.", positions: { A: { x: 13, y: 18 }, B: { x: 45, y: 67 } }, status: "B IO-STOPPED", station: "READY", trace: "B: request; PLC still sees A: entering", fault: true },
+      { time: "00:08", label: "RCS clears only entering", owner: "RCS", plc: "Waiting for action request", signals: ["enter_request"], note: "Clearing the visible bit does not roll back the PLC sequence; PLC assumes a vehicle already consumed entry permission.", positions: { B: { x: 45, y: 67 } }, status: "PARTIAL RESET", station: "READY", trace: "RCS: entering = 0; PLC phase remains advanced", fault: true },
+      { time: "00:10", label: "PLC manually permits B and restarts", owner: "PLC", plc: "New flow starts", signals: ["enter_request", "permission_to_enter"], note: "The manual intervention allows B to continue, but restart removes B from the PLC’s tracked transaction.", positions: { B: { x: 62, y: 67 } }, status: "MANUAL RESTART", station: "B ENTERING", trace: "PLC: permission_to_enter → B; flow reset" },
+      { time: "00:12", label: "B arrives; C requests entry", owner: "B + C", plc: "C receives entry permission", signals: ["at_position", "request_action", "enter_request", "permission_to_enter"], note: "B is at the station and requests action while C’s new entry request starts the restarted PLC sequence.", positions: { B: { x: 84, y: 45 }, C: { x: 49, y: 18 } }, status: "B IN STATION · C AUTHORIZED", station: "B OCCUPIED", trace: "B: at_position + action_request; C: entry_request" },
+      { time: "00:14", label: "C reaches B’s occupied station", owner: "B + C", plc: "Signals fused as one vehicle", signals: ["enter_request", "permission_to_enter", "at_position", "request_action", "entering"], note: "C is admitted into B’s station flow, then blocked by B. PLC combines C’s entry phase with B’s arrival/action phase — the first double-car loop.", positions: { B: { x: 84, y: 45 }, C: { x: 72, y: 18 } }, status: "DOUBLE-CAR LOOP", station: "B OCCUPIED · C BLOCKED", trace: "C: entering; B: arrival/action → PLC sees one false sequence", fault: true },
     ],
   },
-  overlap: {
-    eyebrow: "CASE 02 · OVERLAPPING REQUEST ZONE",
-    title: "Two vehicles share one boolean truth.",
-    subtitle: "See how a rear vehicle can consume permission intended for the front vehicle.",
+  staleSignal: {
+    number: "02",
+    tab: "Stale entering",
+    eyebrow: "CASE 02 · RESIDUAL SIGNAL",
+    title: "A single stale entering bit removes permission.",
+    subtitle: "An operator action in RCS or Xpress leaves an entering signal at the station; PLC resets permission and the next vehicle cannot enter.",
+    rootCause: "The `entering` bit is accepted without proving it belongs to the currently authorised vehicle.",
+    impact: "The PLC shows an entry phase as complete, while the next AGV sees no valid permission and stops at the request zone.",
     steps: [
-      { time: "00:00", label: "C enters the long request zone", owner: "C", plc: "Enter permitted", signals: ["enter_request", "permission_to_enter"], note: "C is first in line." },
-      { time: "00:02", label: "D also enters the request zone", owner: "D", plc: "Permission still high", signals: ["enter_request", "permission_to_enter"], note: "The request area overlaps the merge point." },
-      { time: "00:04", label: "D reads permission first", owner: "D", plc: "Permission reset", signals: ["entering"], note: "D claims the phase, even though C blocks its path." },
-      { time: "00:06", label: "C and D stop each other", owner: "C + D", plc: "Sequence mismatch", signals: ["entering", "enter_request"], note: "PLC cannot tell which vehicle emitted each stage." },
-      { time: "00:08", label: "Signals cross into a false cycle", owner: "C + D", plc: "Double-car loop", signals: ["at_position", "action_request", "entering"], note: "Different vehicles appear as one valid transaction." },
+      { time: "00:00", label: "A requests entry", owner: "A", plc: "Entry permission high", signals: ["enter_request", "permission_to_enter"], note: "A has a normal request and the PLC publishes the shared entry permission.", positions: { A: { x: 37, y: 18 } }, status: "ENTRY PERMITTED", station: "READY", trace: "A: request → permission_to_enter = 1" },
+      { time: "00:02", label: "Entering remains after manual work", owner: "Manual action", plc: "Permission reset", signals: ["entering"], note: "A residual entering bit may be sent or retained by RCS/Xpress during manual recovery.", positions: { A: { x: 26, y: 18 } }, status: "GHOST ENTERING", station: "READY", trace: "stale entering = 1 → permission_to_enter = 0", fault: true },
+      { time: "00:04", label: "Next vehicle requests entry", owner: "B", plc: "No entry permission", signals: ["entering", "enter_request"], note: "B has a legitimate request, but the stale bit keeps the PLC state inconsistent and B stops outside the station.", positions: { A: { x: 26, y: 18 }, B: { x: 56, y: 67 } }, status: "B IO-STOPPED", station: "READY", trace: "B: request = 1; PLC: entry grant remains reset", fault: true },
+    ],
+  },
+  simultaneousRequest: {
+    number: "03",
+    tab: "Simultaneous requests",
+    eyebrow: "CASE 03 · OVERLAPPING REQUEST ZONE",
+    title: "Two entry requests race for one Boolean grant.",
+    subtitle: "The NG exit/entry intersection overlaps the request IO range, allowing a front and rear AGV to request entry in the same window.",
+    rootCause: "The request range is long enough for two AGVs to hold the same `enter_request` bit high at once.",
+    impact: "If the rear vehicle samples the shared grant first, it sends entering and resets the grant. The front vehicle is denied; the rear vehicle is blocked by the front.",
+    steps: [
+      { time: "00:00", label: "A and B enter the shared request zone", owner: "A + B", plc: "One request bit = high", signals: ["enter_request"], note: "Both cars are physically distinct, but the PLC receives only one shared Boolean request.", positions: { A: { x: 52, y: 18 }, B: { x: 35, y: 67 } }, status: "TWO REQUESTERS", station: "READY", trace: "A: request = 1 + B: request = 1 → PLC sees only 1" },
+      { time: "00:02", label: "PLC issues one entry permission", owner: "PLC", plc: "Shared permission high", signals: ["enter_request", "permission_to_enter"], note: "The high permission is not addressed to A or B; either vehicle can read it first.", positions: { A: { x: 59, y: 18 }, B: { x: 48, y: 67 } }, status: "ONE SHARED GRANT", station: "READY", trace: "permission_to_enter = 1 (no vehicle identity)" },
+      { time: "00:04", label: "Rear B reads the grant first", owner: "B", plc: "Permission reset", signals: ["entering"], note: "B sends entering before A. PLC interprets that signal as acknowledgement and resets the shared entry permission.", positions: { A: { x: 65, y: 18 }, B: { x: 61, y: 67 } }, status: "B CONSUMES GRANT", station: "ENTRY CONTESTED", trace: "B: entering = 1 → permission_to_enter = 0", fault: true },
+      { time: "00:06", label: "A is denied; B is physically blocked", owner: "A + B", plc: "Both vehicles stopped", signals: ["enter_request", "entering"], note: "A never gets its grant. B has consumed it, but cannot pass the front vehicle at the pack entry. This is the simultaneous-request IO stop.", positions: { A: { x: 70, y: 18 }, B: { x: 64, y: 67 } }, status: "A DENIED · B BLOCKED", station: "ENTRY INTERLOCK", trace: "A waits for permission; B waits for A to clear", fault: true },
+    ],
+  },
+  misroutedSignal: {
+    number: "04",
+    tab: "Signal dispatch",
+    eyebrow: "CASE 04 · MULTI-TO-ONE DISPATCH",
+    title: "PLC says 1. The expected vehicle reads 0.",
+    subtitle: "RCS binds a station signal to the AGV it considers next at that point, which can be different from the AGV that originated the request.",
+    rootCause: "PLC publishes one station-level permission; RCS must distribute it among several AGVs based on position and point binding.",
+    impact: "The departing AGV can remain stopped even though PLC shows permission sent — because the next station signal was assigned to another AGV.",
+    steps: [
+      { time: "00:00", label: "A requests leave", owner: "A", plc: "Waiting for leave permission", signals: ["request_to_leave"], note: "A is the vehicle that needs to leave the station.", positions: { A: { x: 84, y: 45 } }, status: "A WAITING TO LEAVE", station: "A OCCUPIED", trace: "A: request_to_leave = 1" },
+      { time: "00:02", label: "B becomes the next vehicle at the point", owner: "A + B", plc: "One leave request channel", signals: ["request_to_leave"], note: "RCS uses AGV point position to bind signal recipients. B now matches the point used for the next station signal.", positions: { A: { x: 84, y: 45 }, B: { x: 58, y: 67 } }, status: "RECIPIENT AMBIGUITY", station: "A OCCUPIED", trace: "A awaits leave; B is bound at the next matching point", fault: true },
+      { time: "00:04", label: "PLC sends leave permission", owner: "PLC", plc: "Permission-to-leave = 1", signals: ["request_to_leave", "permission_to_leave"], note: "PLC correctly publishes permission. The failure occurs during the RCS multi-to-one distribution, not in the PLC output bit.", positions: { A: { x: 84, y: 45 }, B: { x: 63, y: 67 } }, status: "PLC OUTPUT = 1", station: "A STILL OCCUPIED", trace: "PLC: 1 → RCS dispatch: A reads 0, B receives 1", fault: true },
+      { time: "00:06", label: "A remains stopped; B owns the wrong signal", owner: "A + B", plc: "Station process mismatched", signals: ["request_to_leave", "permission_to_leave", "leaving"], note: "The expected vehicle A reads 0 in its RCS page, while B may receive the permission. The station and physical vehicle states diverge.", positions: { A: { x: 84, y: 45 }, B: { x: 48, y: 67 } }, status: "MISROUTED PERMISSION", station: "A BLOCKED", trace: "A: permission_to_leave = 0 · B: permission_to_leave = 1", fault: true },
     ],
   },
 };
 
-const allSignals = ["enter_request", "permission_to_enter", "entering", "at_position", "action_request", "permission_to_act", "leave_request", "permission_to_leave", "already_left"];
+const allSignals = [
+  "enter_request",
+  "permission_to_enter",
+  "entering",
+  "at_position",
+  "request_action",
+  "permission_to_act",
+  "request_to_leave",
+  "permission_to_leave",
+  "leaving",
+  "already_left",
+];
 
-function vehiclePosition(scenario: Scenario, step: number, vehicle: "A" | "B" | "C" | "D") {
-  if (scenario === "ghost") {
-    if (vehicle === "A") return step < 2 ? 46 + step * 12 : 18;
-    if (vehicle === "B") return step < 3 ? 17 : 35;
-  } else {
-    if (vehicle === "C") return 35 + Math.min(step, 3) * 8;
-    if (vehicle === "D") return 12 + Math.min(step, 3) * 10;
-  }
-  return -20;
-}
+const vehicleStyles: Record<Vehicle, string> = { A: "agv-a", B: "agv-b", C: "agv-c", D: "agv-d", E: "agv-e" };
 
 export default function Home() {
-  const [scenario, setScenario] = useState<Scenario>("ghost");
-  const [mode, setMode] = useState<Mode>("legacy");
+  const [scenario, setScenario] = useState<ScenarioKey>("doubleStation");
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
   const data = scenarios[scenario];
   const raw = data.steps[step];
-  const protectedIntercept = mode === "protected" && step >= 2;
 
   useEffect(() => {
     if (!playing) return;
@@ -64,26 +130,41 @@ export default function Home() {
         }
         return current + 1;
       });
-    }, 1500);
+    }, 1600);
     return () => window.clearInterval(timer);
   }, [playing, data.steps.length]);
 
-  useEffect(() => { setStep(0); setPlaying(false); }, [scenario, mode]);
+  useEffect(() => {
+    setStep(0);
+    setPlaying(false);
+  }, [scenario]);
 
-  const visibleSignals = useMemo(() => {
-    if (!protectedIntercept) return raw.signals;
-    return scenario === "ghost" ? ["enter_request"] : ["enter_request", "permission_to_enter"];
-  }, [protectedIntercept, raw.signals, scenario]);
+  const activeVehicles = useMemo(
+    () => Object.entries(raw.positions) as [Vehicle, Position][],
+    [raw.positions],
+  );
 
-  const status = protectedIntercept
-    ? scenario === "ghost" ? "STALE SIGNAL REJECTED" : "SECOND REQUEST QUEUED"
-    : step >= 3 ? "FAULT REPRODUCED" : "SEQUENCE RUNNING";
+  const isLastStep = step === data.steps.length - 1;
+
+  function selectScenario(key: ScenarioKey) {
+    setScenario(key);
+  }
+
+  function reset() {
+    setStep(0);
+    setPlaying(false);
+  }
+
+  function togglePlay() {
+    if (isLastStep) setStep(0);
+    setPlaying((current) => !current);
+  }
 
   return (
     <main>
       <header className="topbar">
         <div className="brand"><span className="brandmark">R</span><span>REER ROBOTICS</span></div>
-        <div className="context"><span className="live-dot" /> PACK LINE · IO LAB <span className="version">MODEL 1.0</span></div>
+        <div className="context"><span className="live-dot" /> PACK LINE · IO LAB <span className="version">MODEL 1.1</span></div>
       </header>
 
       <section className="hero">
@@ -92,38 +173,54 @@ export default function Home() {
           <h1>{data.title}</h1>
           <p className="subtitle">{data.subtitle}</p>
         </div>
-        <div className="case-switch" aria-label="Select failure case">
-          <button className={scenario === "ghost" ? "active" : ""} onClick={() => setScenario("ghost")}><span>01</span> Ghost IO</button>
-          <button className={scenario === "overlap" ? "active" : ""} onClick={() => setScenario("overlap")}><span>02</span> Dual request</button>
-        </div>
+        <div className="scenario-count">SCENARIO <b>{data.number}</b> / 04</div>
       </section>
+
+      <nav className="scenario-switch" aria-label="Select an IO failure scenario">
+        {(Object.entries(scenarios) as [ScenarioKey, Scenario][]).map(([key, item]) => (
+          <button key={key} className={scenario === key ? "active" : ""} onClick={() => selectScenario(key)}>
+            <span>{item.number}</span><b>{item.tab}</b>
+          </button>
+        ))}
+      </nav>
 
       <section className="sim-shell">
         <div className="sim-head">
-          <div className="mode-control">
-            <span>CONTROL LOGIC</span>
-            <button className={mode === "legacy" ? "selected danger" : ""} onClick={() => setMode("legacy")}>Legacy PLC</button>
-            <button className={mode === "protected" ? "selected safe" : ""} onClick={() => setMode("protected")}>Safeguarded PLC</button>
-          </div>
-          <div className={`run-status ${protectedIntercept ? "safe-status" : step >= 3 ? "fault-status" : ""}`}><span />{status}</div>
+          <span>LIVE PLC / RCS REPLAY</span>
+          <div className={`run-status ${raw.fault ? "fault-status" : ""}`}><i />{raw.status}</div>
         </div>
 
         <div className="plant">
-          <div className="track-label">RCS LOOP / REQUEST ZONE</div>
+          <div className="track-label">RCS LOOP · SHARED REQUEST IO RANGE · PACK ENTRY</div>
           <div className="track">
-            <div className="request-zone"><span>IO REQUEST ZONE</span></div>
-            <div className="merge-mark">NG MERGE</div>
-            {(scenario === "ghost" ? ["A", "B"] : ["C", "D"]).map((v, i) => (
-              <div key={v} className={`agv agv-${i}`} style={{ left: `${vehiclePosition(scenario, step, v as "A" | "B" | "C" | "D")}%` }}>
-                <span>{v}</span><small>AGV</small>
+            <div className="request-zone"><span>SHARED REQUEST IO RANGE</span></div>
+            <div className="merge-mark">NG EXIT / ENTRY MERGE</div>
+            <div className={`entry-gate ${raw.fault ? "fault-gate" : ""}`}><span>PACK ENTRY</span></div>
+            {activeVehicles.map(([vehicle, position]) => (
+              <div
+                key={vehicle}
+                className={`agv ${vehicleStyles[vehicle]}`}
+                style={{ left: `${position.x}%`, top: `${position.y}px` }}
+              >
+                <span>{vehicle}</span><small>AGV</small>
               </div>
             ))}
-            <div className={`station ${step >= 3 && !protectedIntercept ? "station-fault" : ""}`}><b>PACK 01</b><span>{step >= 3 && !protectedIntercept ? "INTERLOCKED" : "READY"}</span></div>
+            <div className={`station ${raw.fault ? "station-fault" : ""}`}><b>PACK 01</b><span>{raw.station}</span></div>
           </div>
           <div className="io-flow">
-            <div className="node"><span>RCS</span><b>{raw.owner}</b><small>signal source</small></div>
-            <div className="wire"><i className={visibleSignals.length ? "pulse" : ""} /><span>Boolean IO</span></div>
-            <div className={`node plc-node ${protectedIntercept ? "accepted" : ""}`}><span>PLC</span><b>{protectedIntercept ? "Guard active" : raw.plc}</b><small>{mode === "legacy" ? "stage memory only" : "transaction owner + watchdog"}</small></div>
+            <div className="node"><span>RCS</span><b>{raw.owner}</b><small>signal source / recipient</small></div>
+            <div className="wire"><i className="pulse" /><span>shared Boolean IO</span></div>
+            <div className={`node plc-node ${raw.fault ? "fault-node" : ""}`}><span>PLC</span><b>{raw.plc}</b><small>phase-based station process</small></div>
+          </div>
+          <div className={`trace ${raw.fault ? "trace-fault" : ""}`}><span>LIVE TRACE</span><b>{raw.trace}</b></div>
+
+          <div className="plant-controls" aria-label="Scenario playback controls">
+            <button className="reset" onClick={reset} aria-label="Reset scenario">↺</button>
+            <button className="play" onClick={togglePlay}>{playing ? "Ⅱ Pause" : "▶ Play"}</button>
+            <button onClick={() => { setPlaying(false); setStep(Math.max(0, step - 1)); }} aria-label="Previous step">←</button>
+            <button onClick={() => { setPlaying(false); setStep(Math.min(data.steps.length - 1, step + 1)); }} aria-label="Next step">→</button>
+            <div className="progress" aria-label={`Step ${step + 1} of ${data.steps.length}`}><i style={{ width: `${(step / (data.steps.length - 1)) * 100}%` }} /></div>
+            <span>STEP {step + 1} / {data.steps.length}</span>
           </div>
         </div>
 
@@ -139,36 +236,31 @@ export default function Home() {
             </div>
           </div>
           <div className="signal-panel">
-            <div className="panel-title"><span>LIVE IO REGISTER</span><b>{visibleSignals.length} HIGH</b></div>
+            <div className="panel-title"><span>LIVE IO REGISTER</span><b>{raw.signals.length} HIGH</b></div>
             <div className="signals">
-              {allSignals.map((signal) => <div key={signal} className={visibleSignals.includes(signal) ? "high" : ""}><i /><code>{signal}</code><b>{visibleSignals.includes(signal) ? "1" : "0"}</b></div>)}
+              {allSignals.map((signal) => (
+                <div key={signal} className={raw.signals.includes(signal) ? "high" : ""}>
+                  <i /><code>{signal}</code><b>{raw.signals.includes(signal) ? "1" : "0"}</b>
+                </div>
+              ))}
             </div>
           </div>
-          <aside className={`explain-panel ${protectedIntercept ? "protected" : ""}`}>
-            <p>{protectedIntercept ? "PROTECTION RESULT" : "WHY THIS HAPPENS"}</p>
-            <h2>{protectedIntercept ? (scenario === "ghost" ? "The orphaned bit has no valid owner." : "Only the first vehicle owns the transaction.") : raw.note}</h2>
+          <aside className={`explain-panel ${raw.fault ? "fault-explanation" : ""}`}>
+            <p>{raw.fault ? "FAILURE MECHANISM" : "CURRENT PLC STATE"}</p>
+            <h2>{raw.note}</h2>
             <div className="logic-rule">
-              <span>{mode === "legacy" ? "LEGACY RULE" : "COMPLETED PLC RULE"}</span>
-              <code>{mode === "legacy" ? "entering → reset(permission_to_enter)" : "accept(signal) only if vehicle_id = active_owner"}</code>
+              <span>LEGACY PLC BEHAVIOR</span>
+              <code>{raw.fault ? "A valid-looking bit changes the station phase; it carries no AGV identity." : "The PLC advances the station handshake from the active Boolean inputs."}</code>
             </div>
-            <p className="source-note">Reconstructed from the Simulink Stateflow sequence, PACK线纠错 workbook, and incident report.</p>
+            <p className="source-note">Scenario content is taken from the updated PACK correction workbook and incident report.</p>
           </aside>
-        </div>
-
-        <div className="transport">
-          <button className="reset" onClick={() => { setStep(0); setPlaying(false); }}>↺ Reset</button>
-          <button className="play" onClick={() => { if (step === data.steps.length - 1) setStep(0); setPlaying(!playing); }}>{playing ? "Ⅱ Pause" : "▶ Run scenario"}</button>
-          <button onClick={() => { setPlaying(false); setStep(Math.max(0, step - 1)); }}>←</button>
-          <button onClick={() => { setPlaying(false); setStep(Math.min(data.steps.length - 1, step + 1)); }}>→</button>
-          <div className="progress"><i style={{ width: `${(step / (data.steps.length - 1)) * 100}%` }} /></div>
-          <span>STEP {step + 1} / {data.steps.length}</span>
         </div>
       </section>
 
       <section className="finding">
-        <div><span>ROOT CAUSE</span><h2>The PLC receives phases, not identities.</h2></div>
-        <p>Boolean IO can form a valid-looking sequence from different vehicles. Manual movement or an oversized request zone breaks the assumption that one physical AGV owns the full handshake.</p>
-        <div className="fixes"><span>01 · Bind transaction owner</span><span>02 · Reject out-of-order edges</span><span>03 · Timeout + atomic reset</span><span>04 · Shorten request zone</span></div>
+        <div><span>CAUSE IN THIS SCENARIO</span><h2>{data.rootCause}</h2></div>
+        <p>{data.impact}</p>
+        <div className="failure-map"><span>RCS vehicle state</span><i>→</i><span>Shared station IO</span><i>→</i><span>PLC phase state</span><i>→</i><span>Physical line state</span></div>
       </section>
     </main>
   );
