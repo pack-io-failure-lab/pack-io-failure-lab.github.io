@@ -29,6 +29,8 @@ type Scenario = {
   subtitle: string;
   rootCause: string;
   impact: string;
+  immediateFix: string;
+  maintenance: string;
   steps: SimulationStep[];
 };
 
@@ -41,6 +43,8 @@ const scenarios: Record<ScenarioKey, Scenario> = {
     subtitle: "The full sequence from the updated incident report: diversion, partial reset, manual PLC restart, then a second vehicle is admitted into an occupied station.",
     rootCause: "A PLC sequence is restarted without restoring the ownership of the original vehicle transaction.",
     impact: "B reaches the station first. C is then permitted by the restarted flow, but is blocked by B. The PLC combines C’s request with B’s arrival/action signals and treats them as one vehicle.",
+    immediateFix: "Stop the next vehicle, clear IO and process control on both systems, then release the vehicles again from a synchronized state.",
+    maintenance: "Do not pull or add AGVs during an active IO handshake. Prefer manual stations for manual moves because they do not have the entry-permission interlock.",
     steps: [
       { time: "00:00", label: "A requests entry", owner: "A", plc: "Entry permission → A", signals: ["enter_request", "permission_to_enter"], note: "PLC opens an entry phase. Its memory is phase-based; it does not identify the vehicle that owns it.", positions: { A: { x: 31, y: 18 } }, status: "A AUTHORIZED", station: "READY", trace: "A: request → PLC: permission" },
       { time: "00:02", label: "A is pulled from the loop", owner: "A", plc: "Transaction remains open", signals: ["enter_request"], note: "A is physically diverted, but its RCS–PLC handshake remains in the process state.", positions: { A: { x: 12, y: 18 } }, status: "A DIVERTED · IO STILL LIVE", station: "READY", trace: "A moved physically; A IO was not cancelled" },
@@ -50,6 +54,15 @@ const scenarios: Record<ScenarioKey, Scenario> = {
       { time: "00:10", label: "PLC manually permits B and restarts", owner: "PLC", plc: "New flow starts", signals: ["enter_request", "permission_to_enter"], note: "The manual intervention allows B to continue, but restart removes B from the PLC’s tracked transaction.", positions: { B: { x: 62, y: 67 } }, status: "MANUAL RESTART", station: "B ENTERING", trace: "PLC: permission_to_enter → B; flow reset" },
       { time: "00:12", label: "B arrives; C requests entry", owner: "B + C", plc: "C receives entry permission", signals: ["at_position", "request_action", "enter_request", "permission_to_enter"], note: "B is at the station and requests action while C’s new entry request starts the restarted PLC sequence.", positions: { B: { x: 84, y: 45 }, C: { x: 49, y: 18 } }, status: "B IN STATION · C AUTHORIZED", station: "B OCCUPIED", trace: "B: at_position + action_request; C: entry_request" },
       { time: "00:14", label: "C reaches B’s occupied station", owner: "B + C", plc: "Signals fused as one vehicle", signals: ["enter_request", "permission_to_enter", "at_position", "request_action", "entering"], note: "C is admitted into B’s station flow, then blocked by B. PLC combines C’s entry phase with B’s arrival/action phase — the first double-car loop.", positions: { B: { x: 84, y: 45 }, C: { x: 72, y: 18 } }, status: "DOUBLE-CAR LOOP", station: "B OCCUPIED · C BLOCKED", trace: "C: entering; B: arrival/action → PLC sees one false sequence", fault: true },
+      { time: "00:16", label: "B completes work and requests leave", owner: "B", plc: "Leave permission → B", signals: ["at_position", "request_action", "request_to_leave", "permission_to_leave"], note: "B eventually completes its station action. The next valid leave phase begins while C is still waiting at the entry.", positions: { B: { x: 84, y: 45 }, C: { x: 72, y: 18 } }, status: "B LEAVE PERMITTED", station: "B LEAVING · C WAITING", trace: "B: request_to_leave → PLC: permission_to_leave" },
+      { time: "00:18", label: "B leaves the station", owner: "B", plc: "Waiting for next arrival", signals: ["leaving", "entering"], note: "B clears the physical station. The old two-car sequence has not been repaired; it simply advances to the next phase.", positions: { B: { x: 54, y: 67 }, C: { x: 76, y: 18 } }, status: "B LEFT · C ADVANCING", station: "C ENTERING", trace: "B: leaving; C continues from the blocked entry phase", fault: true },
+      { time: "00:20", label: "C reaches position", owner: "C", plc: "C arrival / action phase", signals: ["at_position", "request_action"], note: "C now reaches the station and supplies the arrival/action signals that the PLC expects.", positions: { C: { x: 84, y: 45 }, D: { x: 47, y: 67 } }, status: "C AT POSITION", station: "C OCCUPIED", trace: "C: at_position + request_action" },
+      { time: "00:22", label: "D requests entry", owner: "D", plc: "Entry permission → D", signals: ["at_position", "request_action", "enter_request", "permission_to_enter"], note: "While C is in the station, D begins the next entry request. The same phase-based sequence opens again.", positions: { C: { x: 84, y: 45 }, D: { x: 57, y: 67 } }, status: "D AUTHORIZED", station: "C OCCUPIED", trace: "D: enter_request → PLC: permission_to_enter", fault: true },
+      { time: "00:24", label: "D sends entering", owner: "D", plc: "Entry permission reset", signals: ["at_position", "request_action", "entering"], note: "D consumes the shared entry phase and reaches C’s occupied station, recreating the same double-car condition.", positions: { C: { x: 84, y: 45 }, D: { x: 72, y: 67 } }, status: "D BLOCKED BY C", station: "C OCCUPIED · D BLOCKED", trace: "D: entering → permission reset while C remains inside", fault: true },
+      { time: "00:26", label: "C completes and requests leave", owner: "C", plc: "Leave permission → C", signals: ["at_position", "request_action", "request_to_leave", "permission_to_leave", "entering"], note: "C completes work while D remains in the entry phase. The process now progresses exactly as B’s cycle did.", positions: { C: { x: 84, y: 45 }, D: { x: 72, y: 67 } }, status: "C LEAVE PERMITTED", station: "C LEAVING · D WAITING", trace: "C: request_to_leave; D: entering", fault: true },
+      { time: "00:28", label: "C leaves; D advances", owner: "C + D", plc: "Waiting for D arrival", signals: ["leaving", "entering"], note: "C clears the station and D advances. The same broken process passes to the next pair of vehicles.", positions: { C: { x: 54, y: 18 }, D: { x: 77, y: 67 } }, status: "C LEFT · D ADVANCING", station: "D ENTERING", trace: "C: leaving; D resumes its blocked entry", fault: true },
+      { time: "00:30", label: "D reaches position; E requests", owner: "D + E", plc: "Entry permission → E", signals: ["at_position", "request_action", "enter_request", "permission_to_enter"], note: "D reaches the station while E begins the next entry request. The state mismatch can therefore continue from B/C to D/E.", positions: { D: { x: 84, y: 45 }, E: { x: 56, y: 18 } }, status: "LOOP RECURRING: D / E", station: "D OCCUPIED", trace: "D: at_position/action; E: enter_request → new shared grant", fault: true },
+      { time: "00:32", label: "E consumes the next entry phase", owner: "E", plc: "Same loop repeats", signals: ["at_position", "request_action", "entering"], note: "E sends entering while D occupies the station. Without a synchronized reset, the double-car loop repeats indefinitely vehicle by vehicle.", positions: { D: { x: 84, y: 45 }, E: { x: 72, y: 18 } }, status: "RECURRING LOOP: D / E", station: "D OCCUPIED · E BLOCKED", trace: "E: entering; D: station action → false single-vehicle sequence", fault: true },
     ],
   },
   staleSignal: {
@@ -60,6 +73,8 @@ const scenarios: Record<ScenarioKey, Scenario> = {
     subtitle: "An operator action in RCS or Xpress leaves an entering signal at the station; PLC resets permission and the next vehicle cannot enter.",
     rootCause: "The `entering` bit is accepted without proving it belongs to the currently authorised vehicle.",
     impact: "The PLC shows an entry phase as complete, while the next AGV sees no valid permission and stops at the request zone.",
+    immediateFix: "Reset the extra signal from the AGV through Xpress or correct it from the PLC side; this fault can be cleared by manually sending the needed signal.",
+    maintenance: "Strengthen IO training and supervision so signals are not sent or retained unintentionally; also consider power-cycle and network-loss signal effects during diagnosis.",
     steps: [
       { time: "00:00", label: "A requests entry", owner: "A", plc: "Entry permission high", signals: ["enter_request", "permission_to_enter"], note: "A has a normal request and the PLC publishes the shared entry permission.", positions: { A: { x: 37, y: 18 } }, status: "ENTRY PERMITTED", station: "READY", trace: "A: request → permission_to_enter = 1" },
       { time: "00:02", label: "Entering remains after manual work", owner: "Manual action", plc: "Permission reset", signals: ["entering"], note: "A residual entering bit may be sent or retained by RCS/Xpress during manual recovery.", positions: { A: { x: 26, y: 18 } }, status: "GHOST ENTERING", station: "READY", trace: "stale entering = 1 → permission_to_enter = 0", fault: true },
@@ -74,6 +89,8 @@ const scenarios: Record<ScenarioKey, Scenario> = {
     subtitle: "The NG exit/entry intersection overlaps the request IO range, allowing a front and rear AGV to request entry in the same window.",
     rootCause: "The request range is long enough for two AGVs to hold the same `enter_request` bit high at once.",
     impact: "If the rear vehicle samples the shared grant first, it sends entering and resets the grant. The front vehicle is denied; the rear vehicle is blocked by the front.",
+    immediateFix: "Move the front vehicle away, let the rear vehicle proceed first, then add the front vehicle back into the route.",
+    maintenance: "Keep the request distance short enough that the NG exit/entry crossing cannot contain two simultaneous requesters; the report notes this adjustment was made with the GZ site team.",
     steps: [
       { time: "00:00", label: "A and B enter the shared request zone", owner: "A + B", plc: "One request bit = high", signals: ["enter_request"], note: "Both cars are physically distinct, but the PLC receives only one shared Boolean request.", positions: { A: { x: 52, y: 18 }, B: { x: 35, y: 67 } }, status: "TWO REQUESTERS", station: "READY", trace: "A: request = 1 + B: request = 1 → PLC sees only 1" },
       { time: "00:02", label: "PLC issues one entry permission", owner: "PLC", plc: "Shared permission high", signals: ["enter_request", "permission_to_enter"], note: "The high permission is not addressed to A or B; either vehicle can read it first.", positions: { A: { x: 59, y: 18 }, B: { x: 48, y: 67 } }, status: "ONE SHARED GRANT", station: "READY", trace: "permission_to_enter = 1 (no vehicle identity)" },
@@ -85,15 +102,18 @@ const scenarios: Record<ScenarioKey, Scenario> = {
     number: "04",
     tab: "Signal dispatch",
     eyebrow: "CASE 04 · MULTI-TO-ONE DISPATCH",
-    title: "PLC says 1. The expected vehicle reads 0.",
-    subtitle: "RCS binds a station signal to the AGV it considers next at that point, which can be different from the AGV that originated the request.",
-    rootCause: "PLC publishes one station-level permission; RCS must distribute it among several AGVs based on position and point binding.",
-    impact: "The departing AGV can remain stopped even though PLC shows permission sent — because the next station signal was assigned to another AGV.",
+    title: "PLC says 1. The vehicle at the point reads 0.",
+    subtitle: "A leaves externally without permission; B reaches the departure point, but the later PLC permission is delivered back to A instead of B.",
+    rootCause: "PLC publishes one station-level permission; RCS distributes it by position/point binding, which can still point to the earlier vehicle after physical states diverge.",
+    impact: "B remains stopped at the departure point even though PLC shows permission sent — because A receives the 1 and B reads 0.",
+    immediateFix: "From PLC, reset the permission and send it once more. From RCS, only after confirming a safe exit, skip the IO stage and clear the vehicle IO.",
+    maintenance: "Treat this as an observation-and-data-collection issue: record repeat cases, the vehicle point binding, and both RCS/PLC timestamps to confirm the routing condition.",
     steps: [
-      { time: "00:00", label: "A requests leave", owner: "A", plc: "Waiting for leave permission", signals: ["request_to_leave"], note: "A is the vehicle that needs to leave the station.", positions: { A: { x: 84, y: 45 } }, status: "A WAITING TO LEAVE", station: "A OCCUPIED", trace: "A: request_to_leave = 1" },
-      { time: "00:02", label: "B becomes the next vehicle at the point", owner: "A + B", plc: "One leave request channel", signals: ["request_to_leave"], note: "RCS uses AGV point position to bind signal recipients. B now matches the point used for the next station signal.", positions: { A: { x: 84, y: 45 }, B: { x: 58, y: 67 } }, status: "RECIPIENT AMBIGUITY", station: "A OCCUPIED", trace: "A awaits leave; B is bound at the next matching point", fault: true },
-      { time: "00:04", label: "PLC sends leave permission", owner: "PLC", plc: "Permission-to-leave = 1", signals: ["request_to_leave", "permission_to_leave"], note: "PLC correctly publishes permission. The failure occurs during the RCS multi-to-one distribution, not in the PLC output bit.", positions: { A: { x: 84, y: 45 }, B: { x: 63, y: 67 } }, status: "PLC OUTPUT = 1", station: "A STILL OCCUPIED", trace: "PLC: 1 → RCS dispatch: A reads 0, B receives 1", fault: true },
-      { time: "00:06", label: "A remains stopped; B owns the wrong signal", owner: "A + B", plc: "Station process mismatched", signals: ["request_to_leave", "permission_to_leave", "leaving"], note: "The expected vehicle A reads 0 in its RCS page, while B may receive the permission. The station and physical vehicle states diverge.", positions: { A: { x: 84, y: 45 }, B: { x: 48, y: 67 } }, status: "MISROUTED PERMISSION", station: "A BLOCKED", trace: "A: permission_to_leave = 0 · B: permission_to_leave = 1", fault: true },
+      { time: "00:00", label: "A requests leave", owner: "A", plc: "Waiting for leave permission", signals: ["request_to_leave"], note: "A is the vehicle that needs to leave PACK 01 and raises the normal leave request.", positions: { A: { x: 84, y: 45 } }, status: "A WAITING TO LEAVE", station: "A OCCUPIED", trace: "A: request_to_leave = 1" },
+      { time: "00:02", label: "A leaves externally without permission", owner: "A", plc: "Old request still associated with A", signals: ["request_to_leave", "leaving"], note: "An external condition moves A out of the station before it receives leave permission. Its request remains the known station context.", positions: { A: { x: 17, y: 18 } }, status: "A LEFT EXTERNALLY", station: "EMPTY", trace: "A physically left; PLC/RCS context still points to A", fault: true },
+      { time: "00:04", label: "B arrives at the departure point", owner: "B", plc: "One leave channel", signals: ["request_to_leave"], note: "B reaches the station point and becomes the vehicle that actually needs the next leave permission.", positions: { A: { x: 17, y: 18 }, B: { x: 84, y: 45 } }, status: "B WAITING AT POINT", station: "B OCCUPIED", trace: "B at departure point; expected recipient is now B", fault: true },
+      { time: "00:06", label: "PLC sends leave permission", owner: "PLC", plc: "Permission-to-leave = 1", signals: ["request_to_leave", "permission_to_leave"], note: "PLC correctly publishes its station-level permission. The fault is in how RCS distributes the signal after the physical order changed.", positions: { A: { x: 17, y: 18 }, B: { x: 84, y: 45 } }, status: "PLC OUTPUT = 1", station: "B STILL OCCUPIED", trace: "PLC: 1 → RCS dispatch selects earlier A, not B", fault: true },
+      { time: "00:08", label: "A receives 1; B reads 0", owner: "A + B", plc: "Station process mismatched", signals: ["request_to_leave", "permission_to_leave"], note: "The permission reaches A, which already left externally. B is at the correct point but reads 0, so it remains stopped despite the PLC output showing 1.", positions: { A: { x: 17, y: 18 }, B: { x: 84, y: 45 } }, status: "A = 1 · B = 0", station: "B BLOCKED", trace: "A: permission_to_leave = 1 · B: permission_to_leave = 0", fault: true },
     ],
   },
 };
@@ -261,6 +281,16 @@ export default function Home() {
         <div><span>CAUSE IN THIS SCENARIO</span><h2>{data.rootCause}</h2></div>
         <p>{data.impact}</p>
         <div className="failure-map"><span>RCS vehicle state</span><i>→</i><span>Shared station IO</span><i>→</i><span>PLC phase state</span><i>→</i><span>Physical line state</span></div>
+        <div className="maintenance-grid">
+          <article>
+            <p>IMMEDIATE RECOVERY</p>
+            <h3>{data.immediateFix}</h3>
+          </article>
+          <article>
+            <p>LONG-TERM MAINTENANCE</p>
+            <h3>{data.maintenance}</h3>
+          </article>
+        </div>
       </section>
     </main>
   );
