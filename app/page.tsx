@@ -6,7 +6,8 @@ type Vehicle = "A" | "B" | "C" | "D" | "E";
 type ScenarioKey = "doubleStation" | "staleSignal" | "simultaneousRequest" | "misroutedSignal";
 type Language = "en" | "zh";
 
-type Position = { x: number; y: number };
+type Route = "entry" | "station" | "exit" | "diverted";
+type Position = { x: number; y: number; route?: Route };
 
 type SimulationStep = {
   time: string;
@@ -37,9 +38,9 @@ type Scenario = {
 
 const scenarios: Record<ScenarioKey, Scenario> = {
   doubleStation: {
-    number: "01",
+    number: "03",
     tab: "Double-car station",
-    eyebrow: "CASE 01 · STALE IO CASCADE",
+    eyebrow: "CASE 03 · STALE IO CASCADE",
     title: "One ghost handshake creates a two-car station loop.",
     subtitle: "The full sequence from the updated incident report: diversion, partial reset, manual PLC restart, then a second vehicle is admitted into an occupied station.",
     rootCause: "A PLC sequence is restarted without restoring the ownership of the original vehicle transaction.",
@@ -48,28 +49,28 @@ const scenarios: Record<ScenarioKey, Scenario> = {
     maintenance: "Do not pull or add AGVs during an active IO handshake. Prefer manual stations for manual moves because they do not have the entry-permission interlock.",
     steps: [
       { time: "00:00", label: "A requests entry", owner: "A", plc: "Entry permission → A", signals: ["enter_request", "permission_to_enter"], note: "PLC opens an entry phase. Its memory is phase-based; it does not identify the vehicle that owns it.", positions: { A: { x: 31, y: 18 } }, status: "A AUTHORIZED", station: "READY", trace: "A: request → PLC: permission" },
-      { time: "00:02", label: "A is pulled from the loop", owner: "A", plc: "Transaction remains open", signals: ["enter_request"], note: "A is physically diverted, but its RCS–PLC handshake remains in the process state.", positions: { A: { x: 12, y: 18 } }, status: "A DIVERTED · IO STILL LIVE", station: "READY", trace: "A moved physically; A IO was not cancelled" },
-      { time: "00:04", label: "A leaves a late entering bit", owner: "A", plc: "Entry permission reset", signals: ["entering"], note: "The stale entering bit is accepted as the acknowledgement for the old permission and resets the entry grant.", positions: { A: { x: 13, y: 18 }, B: { x: 34, y: 67 } }, status: "STALE ENTERING", station: "READY", trace: "A: entering = 1 → permission_to_enter = 0", fault: true },
-      { time: "00:06", label: "B requests the same station", owner: "B", plc: "B has no valid grant", signals: ["entering", "enter_request"], note: "B’s request overlaps A’s orphaned entering phase. PLC will not issue B a clean permission.", positions: { A: { x: 13, y: 18 }, B: { x: 45, y: 67 } }, status: "B IO-STOPPED", station: "READY", trace: "B: request; PLC still sees A: entering", fault: true },
+      { time: "00:02", label: "A is pulled from the loop", owner: "A", plc: "Transaction remains open", signals: ["enter_request"], note: "A is physically diverted, but its RCS–PLC handshake remains in the process state.", positions: { A: { x: 12, y: 18, route: "diverted" } }, status: "A DIVERTED · IO STILL LIVE", station: "READY", trace: "A moved physically; A IO was not cancelled" },
+      { time: "00:04", label: "A leaves a late entering bit", owner: "A", plc: "Entry permission reset", signals: ["entering"], note: "The stale entering bit is accepted as the acknowledgement for the old permission and resets the entry grant.", positions: { A: { x: 13, y: 18, route: "diverted" }, B: { x: 34, y: 67 } }, status: "STALE ENTERING", station: "READY", trace: "A: entering = 1 → permission_to_enter = 0", fault: true },
+      { time: "00:06", label: "B requests the same station", owner: "B", plc: "B has no valid grant", signals: ["entering", "enter_request"], note: "B’s request overlaps A’s orphaned entering phase. PLC will not issue B a clean permission.", positions: { A: { x: 13, y: 18, route: "diverted" }, B: { x: 45, y: 67 } }, status: "B IO-STOPPED", station: "READY", trace: "B: request; PLC still sees A: entering", fault: true },
       { time: "00:08", label: "RCS clears only entering", owner: "RCS", plc: "Waiting for action request", signals: ["enter_request"], note: "Clearing the visible bit does not roll back the PLC sequence; PLC assumes a vehicle already consumed entry permission.", positions: { B: { x: 45, y: 67 } }, status: "PARTIAL RESET", station: "READY", trace: "RCS: entering = 0; PLC phase remains advanced", fault: true },
       { time: "00:10", label: "PLC manually permits B and restarts", owner: "PLC", plc: "New flow starts", signals: ["enter_request", "permission_to_enter"], note: "The manual intervention allows B to continue, but restart removes B from the PLC’s tracked transaction.", positions: { B: { x: 62, y: 67 } }, status: "MANUAL RESTART", station: "B ENTERING", trace: "PLC: permission_to_enter → B; flow reset" },
       { time: "00:12", label: "B arrives; C requests entry", owner: "B + C", plc: "C receives entry permission", signals: ["at_position", "request_action", "enter_request", "permission_to_enter"], note: "B is at the station and requests action while C’s new entry request starts the restarted PLC sequence.", positions: { B: { x: 84, y: 45 }, C: { x: 49, y: 18 } }, status: "B IN STATION · C AUTHORIZED", station: "B OCCUPIED", trace: "B: at_position + action_request; C: entry_request" },
       { time: "00:14", label: "C reaches B’s occupied station", owner: "B + C", plc: "Signals fused as one vehicle", signals: ["enter_request", "permission_to_enter", "at_position", "request_action", "entering"], note: "C is admitted into B’s station flow, then blocked by B. PLC combines C’s entry phase with B’s arrival/action phase — the first double-car loop.", positions: { B: { x: 84, y: 45 }, C: { x: 72, y: 18 } }, status: "DOUBLE-CAR LOOP", station: "B OCCUPIED · C BLOCKED", trace: "C: entering; B: arrival/action → PLC sees one false sequence", fault: true },
       { time: "00:16", label: "B completes work and requests leave", owner: "B", plc: "Leave permission → B", signals: ["at_position", "request_action", "request_to_leave", "permission_to_leave"], note: "B eventually completes its station action. The next valid leave phase begins while C is still waiting at the entry.", positions: { B: { x: 84, y: 45 }, C: { x: 72, y: 18 } }, status: "B LEAVE PERMITTED", station: "B LEAVING · C WAITING", trace: "B: request_to_leave → PLC: permission_to_leave" },
-      { time: "00:18", label: "B leaves the station", owner: "B", plc: "Waiting for next arrival", signals: ["leaving", "entering"], note: "B clears the physical station. The old two-car sequence has not been repaired; it simply advances to the next phase.", positions: { B: { x: 54, y: 67 }, C: { x: 76, y: 18 } }, status: "B LEFT · C ADVANCING", station: "C ENTERING", trace: "B: leaving; C continues from the blocked entry phase", fault: true },
+      { time: "00:18", label: "B leaves the station", owner: "B", plc: "Waiting for next arrival", signals: ["leaving", "entering"], note: "B clears the physical station. The old two-car sequence has not been repaired; it simply advances to the next phase.", positions: { B: { x: 54, y: 67, route: "exit" }, C: { x: 76, y: 18 } }, status: "B LEFT · C ADVANCING", station: "C ENTERING", trace: "B: leaving; C continues from the blocked entry phase", fault: true },
       { time: "00:20", label: "C reaches position", owner: "C", plc: "C arrival / action phase", signals: ["at_position", "request_action"], note: "C now reaches the station and supplies the arrival/action signals that the PLC expects.", positions: { C: { x: 84, y: 45 }, D: { x: 47, y: 67 } }, status: "C AT POSITION", station: "C OCCUPIED", trace: "C: at_position + request_action" },
       { time: "00:22", label: "D requests entry", owner: "D", plc: "Entry permission → D", signals: ["at_position", "request_action", "enter_request", "permission_to_enter"], note: "While C is in the station, D begins the next entry request. The same phase-based sequence opens again.", positions: { C: { x: 84, y: 45 }, D: { x: 57, y: 67 } }, status: "D AUTHORIZED", station: "C OCCUPIED", trace: "D: enter_request → PLC: permission_to_enter", fault: true },
       { time: "00:24", label: "D sends entering", owner: "D", plc: "Entry permission reset", signals: ["at_position", "request_action", "entering"], note: "D consumes the shared entry phase and reaches C’s occupied station, recreating the same double-car condition.", positions: { C: { x: 84, y: 45 }, D: { x: 72, y: 67 } }, status: "D BLOCKED BY C", station: "C OCCUPIED · D BLOCKED", trace: "D: entering → permission reset while C remains inside", fault: true },
       { time: "00:26", label: "C completes and requests leave", owner: "C", plc: "Leave permission → C", signals: ["at_position", "request_action", "request_to_leave", "permission_to_leave", "entering"], note: "C completes work while D remains in the entry phase. The process now progresses exactly as B’s cycle did.", positions: { C: { x: 84, y: 45 }, D: { x: 72, y: 67 } }, status: "C LEAVE PERMITTED", station: "C LEAVING · D WAITING", trace: "C: request_to_leave; D: entering", fault: true },
-      { time: "00:28", label: "C leaves; D advances", owner: "C + D", plc: "Waiting for D arrival", signals: ["leaving", "entering"], note: "C clears the station and D advances. The same broken process passes to the next pair of vehicles.", positions: { C: { x: 54, y: 18 }, D: { x: 77, y: 67 } }, status: "C LEFT · D ADVANCING", station: "D ENTERING", trace: "C: leaving; D resumes its blocked entry", fault: true },
+      { time: "00:28", label: "C leaves; D advances", owner: "C + D", plc: "Waiting for D arrival", signals: ["leaving", "entering"], note: "C clears the station and D advances. The same broken process passes to the next pair of vehicles.", positions: { C: { x: 54, y: 18, route: "exit" }, D: { x: 77, y: 67 } }, status: "C LEFT · D ADVANCING", station: "D ENTERING", trace: "C: leaving; D resumes its blocked entry", fault: true },
       { time: "00:30", label: "D reaches position; E requests", owner: "D + E", plc: "Entry permission → E", signals: ["at_position", "request_action", "enter_request", "permission_to_enter"], note: "D reaches the station while E begins the next entry request. The state mismatch can therefore continue from B/C to D/E.", positions: { D: { x: 84, y: 45 }, E: { x: 56, y: 18 } }, status: "LOOP RECURRING: D / E", station: "D OCCUPIED", trace: "D: at_position/action; E: enter_request → new shared grant", fault: true },
       { time: "00:32", label: "E consumes the next entry phase", owner: "E", plc: "Same loop repeats", signals: ["at_position", "request_action", "entering"], note: "E sends entering while D occupies the station. Without a synchronized reset, the double-car loop repeats indefinitely vehicle by vehicle.", positions: { D: { x: 84, y: 45 }, E: { x: 72, y: 18 } }, status: "RECURRING LOOP: D / E", station: "D OCCUPIED · E BLOCKED", trace: "E: entering; D: station action → false single-vehicle sequence", fault: true },
     ],
   },
   staleSignal: {
-    number: "02",
+    number: "01",
     tab: "Stale entering",
-    eyebrow: "CASE 02 · RESIDUAL SIGNAL",
+    eyebrow: "CASE 01 · RESIDUAL SIGNAL",
     title: "A single stale entering bit removes permission.",
     subtitle: "An operator action in RCS or Xpress leaves an entering signal at the station; PLC resets permission and the next vehicle cannot enter.",
     rootCause: "The `entering` bit is accepted without proving it belongs to the currently authorised vehicle.",
@@ -83,9 +84,9 @@ const scenarios: Record<ScenarioKey, Scenario> = {
     ],
   },
   simultaneousRequest: {
-    number: "03",
+    number: "02",
     tab: "Simultaneous requests",
-    eyebrow: "CASE 03 · OVERLAPPING REQUEST ZONE",
+    eyebrow: "CASE 02 · OVERLAPPING REQUEST ZONE",
     title: "Two entry requests race for one Boolean grant.",
     subtitle: "The NG exit/entry intersection overlaps the request IO range, allowing a front and rear AGV to request entry in the same window.",
     rootCause: "The request range is long enough for two AGVs to hold the same `enter_request` bit high at once.",
@@ -111,13 +112,15 @@ const scenarios: Record<ScenarioKey, Scenario> = {
     maintenance: "Treat this as an observation-and-data-collection issue: record repeat cases, the vehicle point binding, and both RCS/PLC timestamps to confirm the routing condition.",
     steps: [
       { time: "00:00", label: "A requests leave", owner: "A", plc: "Waiting for leave permission", signals: ["request_to_leave"], note: "A is the vehicle that needs to leave PACK 01 and raises the normal leave request.", positions: { A: { x: 84, y: 45 } }, status: "A WAITING TO LEAVE", station: "A OCCUPIED", trace: "A: request_to_leave = 1" },
-      { time: "00:02", label: "A leaves externally without permission", owner: "A", plc: "Old request still associated with A", signals: ["request_to_leave", "leaving"], note: "An external condition moves A out of the station before it receives leave permission. Its request remains the known station context.", positions: { A: { x: 17, y: 18 } }, status: "A LEFT EXTERNALLY", station: "EMPTY", trace: "A physically left; PLC/RCS context still points to A", fault: true },
-      { time: "00:04", label: "B arrives at the departure point", owner: "B", plc: "One leave channel", signals: ["request_to_leave"], note: "B reaches the station point and becomes the vehicle that actually needs the next leave permission.", positions: { A: { x: 17, y: 18 }, B: { x: 84, y: 45 } }, status: "B WAITING AT POINT", station: "B OCCUPIED", trace: "B at departure point; expected recipient is now B", fault: true },
-      { time: "00:06", label: "PLC sends leave permission", owner: "PLC", plc: "Permission-to-leave = 1", signals: ["request_to_leave", "permission_to_leave"], note: "PLC correctly publishes its station-level permission. The fault is in how RCS distributes the signal after the physical order changed.", positions: { A: { x: 17, y: 18 }, B: { x: 84, y: 45 } }, status: "PLC OUTPUT = 1", station: "B STILL OCCUPIED", trace: "PLC: 1 → RCS dispatch selects earlier A, not B", fault: true },
-      { time: "00:08", label: "A receives 1; B reads 0", owner: "A + B", plc: "Station process mismatched", signals: ["request_to_leave", "permission_to_leave"], note: "The permission reaches A, which already left externally. B is at the correct point but reads 0, so it remains stopped despite the PLC output showing 1.", positions: { A: { x: 17, y: 18 }, B: { x: 84, y: 45 } }, status: "A = 1 · B = 0", station: "B BLOCKED", trace: "A: permission_to_leave = 1 · B: permission_to_leave = 0", fault: true },
+      { time: "00:02", label: "A leaves externally without permission", owner: "A", plc: "Old request still associated with A", signals: ["request_to_leave", "leaving"], note: "An external condition moves A out of the station before it receives leave permission. Its request remains the known station context.", positions: { A: { x: 66, y: 18, route: "exit" } }, status: "A LEFT EXTERNALLY", station: "EMPTY", trace: "A physically left; PLC/RCS context still points to A", fault: true },
+      { time: "00:04", label: "B arrives at the departure point", owner: "B", plc: "One leave channel", signals: ["request_to_leave"], note: "B reaches the station point and becomes the vehicle that actually needs the next leave permission.", positions: { A: { x: 42, y: 18, route: "exit" }, B: { x: 84, y: 45 } }, status: "B WAITING AT POINT", station: "B OCCUPIED", trace: "B at departure point; expected recipient is now B", fault: true },
+      { time: "00:06", label: "PLC sends leave permission", owner: "PLC", plc: "Permission-to-leave = 1", signals: ["request_to_leave", "permission_to_leave"], note: "PLC correctly publishes its station-level permission. The fault is in how RCS distributes the signal after the physical order changed.", positions: { A: { x: 28, y: 18, route: "exit" }, B: { x: 84, y: 45 } }, status: "PLC OUTPUT = 1", station: "B STILL OCCUPIED", trace: "PLC: 1 → RCS dispatch selects earlier A, not B", fault: true },
+      { time: "00:08", label: "A receives 1; B reads 0", owner: "A + B", plc: "Station process mismatched", signals: ["request_to_leave", "permission_to_leave"], note: "The permission reaches A, which already left externally. B is at the correct point but reads 0, so it remains stopped despite the PLC output showing 1.", positions: { A: { x: 14, y: 18, route: "exit" }, B: { x: 84, y: 45 } }, status: "A = 1 · B = 0", station: "B BLOCKED", trace: "A: permission_to_leave = 1 · B: permission_to_leave = 0", fault: true },
     ],
   },
 };
+
+const scenarioOrder: ScenarioKey[] = ["staleSignal", "simultaneousRequest", "doubleStation", "misroutedSignal"];
 
 const allSignals = [
   "enter_request",
@@ -144,6 +147,8 @@ const chrome = {
     requestZone: "SHARED REQUEST IO RANGE",
     merge: "NG EXIT / ENTRY MERGE",
     entry: "PACK ENTRY",
+    entryPath: "ENTRY PATH · RCS LOOP →",
+    exitPath: "LEAVING PATH · OUTBOUND / NG EXIT ←",
     source: "signal source / recipient",
     booleanIo: "shared Boolean IO",
     process: "phase-based station process",
@@ -181,6 +186,8 @@ const chrome = {
     requestZone: "共享请求 IO 区间",
     merge: "NG 下线 / 进站交汇点",
     entry: "PACK 入口",
+    entryPath: "进入路径 · RCS 环线 →",
+    exitPath: "离开路径 · 出站 / NG 下线 ←",
     source: "信号来源 / 接收对象",
     booleanIo: "共享布尔 IO",
     process: "基于阶段的站台流程",
@@ -226,7 +233,7 @@ const signalLabels: Record<string, string> = {
 
 const chineseText: Record<string, string> = {
   "Double-car station": "双车同站",
-  "CASE 01 · STALE IO CASCADE": "场景 01 · 遗留 IO 连锁",
+  "CASE 03 · STALE IO CASCADE": "场景 03 · 遗留 IO 连锁",
   "One ghost handshake creates a two-car station loop.": "一次遗留握手会形成双车同站循环。",
   "The full sequence from the updated incident report: diversion, partial reset, manual PLC restart, then a second vehicle is admitted into an occupied station.": "根据更新后的事件报告完整复现：车辆被拉离、局部复位、PLC 人工重启，随后第二辆车被放入已占用的站台。",
   "A PLC sequence is restarted without restoring the ownership of the original vehicle transaction.": "PLC 流程被重启，但没有恢复原始车辆事务的归属关系。",
@@ -331,7 +338,7 @@ const chineseText: Record<string, string> = {
   "D OCCUPIED · E BLOCKED": "D 占用 · E 被阻挡",
   "E: entering; D: station action → false single-vehicle sequence": "E：正在进入；D：站内动作 → 错误的单车流程",
   "Stale entering": "遗留正在进入",
-  "CASE 02 · RESIDUAL SIGNAL": "场景 02 · 遗留信号",
+  "CASE 01 · RESIDUAL SIGNAL": "场景 01 · 遗留信号",
   "A single stale entering bit removes permission.": "单个遗留的正在进入信号会取消许可。",
   "An operator action in RCS or Xpress leaves an entering signal at the station; PLC resets permission and the next vehicle cannot enter.": "RCS 或 Xpress 中的人工操作在站台留下正在进入信号；PLC 复位许可，下一辆车无法进入。",
   "The `entering` bit is accepted without proving it belongs to the currently authorised vehicle.": "未验证 `entering` 信号是否属于当前已获许可的车辆就被 PLC 接受。",
@@ -351,7 +358,7 @@ const chineseText: Record<string, string> = {
   "B has a legitimate request, but the stale bit keeps the PLC state inconsistent and B stops outside the station.": "B 的请求是有效的，但遗留信号使 PLC 状态不一致，B 停在站台外。",
   "B: request = 1; PLC: entry grant remains reset": "B：请求 = 1；PLC：允许进入保持复位",
   "Simultaneous requests": "同时请求进入",
-  "CASE 03 · OVERLAPPING REQUEST ZONE": "场景 03 · 请求区重叠",
+  "CASE 02 · OVERLAPPING REQUEST ZONE": "场景 02 · 请求区重叠",
   "Two entry requests race for one Boolean grant.": "两个进入请求竞争同一个布尔许可。",
   "The NG exit/entry intersection overlaps the request IO range, allowing a front and rear AGV to request entry in the same window.": "NG 下线/进站交汇点与请求 IO 范围重叠，使前后两辆 AGV 能在同一时间窗请求进入。",
   "The request range is long enough for two AGVs to hold the same `enter_request` bit high at once.": "请求范围过长，使两辆 AGV 可以同时保持同一个 `enter_request` 信号为高。",
@@ -425,27 +432,29 @@ function translate(value: string, language: Language) {
 }
 
 export default function Home() {
-  const [scenario, setScenario] = useState<ScenarioKey>("doubleStation");
+  const [scenario, setScenario] = useState<ScenarioKey>("staleSignal");
   const [language, setLanguage] = useState<Language>("en");
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
   const data = scenarios[scenario];
-  const raw = data.steps[step];
+  const safeStep = Math.min(Math.max(step, 0), data.steps.length - 1);
+  const raw = data.steps[safeStep] ?? data.steps[0];
   const copy = chrome[language];
 
   useEffect(() => {
     if (!playing) return;
     const timer = window.setInterval(() => {
       setStep((current) => {
-        if (current >= data.steps.length - 1) {
+        const currentStep = Math.min(Math.max(current, 0), data.steps.length - 1);
+        if (currentStep >= data.steps.length - 1) {
           setPlaying(false);
-          return current;
+          return data.steps.length - 1;
         }
-        return current + 1;
+        return currentStep + 1;
       });
     }, 1600);
     return () => window.clearInterval(timer);
-  }, [playing, data.steps.length]);
+  }, [playing, scenario, data.steps.length]);
 
   useEffect(() => {
     setStep(0);
@@ -461,9 +470,11 @@ export default function Home() {
     [raw.positions],
   );
 
-  const isLastStep = step === data.steps.length - 1;
+  const isLastStep = safeStep === data.steps.length - 1;
 
   function selectScenario(key: ScenarioKey) {
+    setPlaying(false);
+    setStep(0);
     setScenario(key);
   }
 
@@ -473,7 +484,11 @@ export default function Home() {
   }
 
   function togglePlay() {
-    if (isLastStep) setStep(0);
+    if (isLastStep) {
+      setStep(0);
+      setPlaying(true);
+      return;
+    }
     setPlaying((current) => !current);
   }
 
@@ -500,11 +515,14 @@ export default function Home() {
       </section>
 
       <nav className="scenario-switch" aria-label={language === "zh" ? "选择 IO 故障场景" : "Select an IO failure scenario"}>
-        {(Object.entries(scenarios) as [ScenarioKey, Scenario][]).map(([key, item]) => (
+        {scenarioOrder.map((key) => {
+          const item = scenarios[key];
+          return (
           <button key={key} className={scenario === key ? "active" : ""} onClick={() => selectScenario(key)}>
             <span>{item.number}</span><b>{translate(item.tab, language)}</b>
           </button>
-        ))}
+          );
+        })}
       </nav>
 
       <section className="sim-shell">
@@ -516,18 +534,23 @@ export default function Home() {
         <div className="plant">
           <div className="track-label">{copy.track}</div>
           <div className="track">
+            <div className="flow-path entry-path"><span>{copy.entryPath}</span></div>
+            <div className="flow-path exit-path"><span>{copy.exitPath}</span></div>
             <div className="request-zone"><span>{copy.requestZone}</span></div>
             <div className="merge-mark">{copy.merge}</div>
             <div className={`entry-gate ${raw.fault ? "fault-gate" : ""}`}><span>{copy.entry}</span></div>
-            {activeVehicles.map(([vehicle, position]) => (
-              <div
-                key={vehicle}
-                className={`agv ${vehicleStyles[vehicle]}`}
-                style={{ left: `${position.x}%`, top: `${position.y}px` }}
-              >
-                <span>{vehicle}</span><small>{copy.agv}</small>
-              </div>
-            ))}
+            {activeVehicles.map(([vehicle, position]) => {
+              const route = position.route ?? (position.x >= 79 ? "station" : "entry");
+              return (
+                <div
+                  key={vehicle}
+                  className={`agv ${vehicleStyles[vehicle]} agv-route-${route}`}
+                  style={{ left: `${position.x}%` }}
+                >
+                  <span>{vehicle}</span><small>{copy.agv}</small>
+                </div>
+              );
+            })}
             <div className={`station ${raw.fault ? "station-fault" : ""}`}><b>PACK 01</b><span>{translate(raw.station, language)}</span></div>
           </div>
           <div className="io-flow">
@@ -540,10 +563,10 @@ export default function Home() {
           <div className="plant-controls" aria-label={language === "zh" ? "场景播放控制" : "Scenario playback controls"}>
             <button className="reset" onClick={reset} aria-label={copy.resetScenario}>↺</button>
             <button className="play" onClick={togglePlay}>{playing ? copy.pause : copy.play}</button>
-            <button onClick={() => { setPlaying(false); setStep(Math.max(0, step - 1)); }} aria-label={copy.previousStep}>←</button>
-            <button onClick={() => { setPlaying(false); setStep(Math.min(data.steps.length - 1, step + 1)); }} aria-label={copy.nextStep}>→</button>
-            <div className="progress" aria-label={`${copy.step} ${step + 1} / ${data.steps.length}`}><i style={{ width: `${(step / (data.steps.length - 1)) * 100}%` }} /></div>
-            <span>{copy.step} {step + 1} / {data.steps.length}</span>
+            <button onClick={() => { setPlaying(false); setStep((current) => Math.max(0, Math.min(data.steps.length - 1, current - 1))); }} aria-label={copy.previousStep}>←</button>
+            <button onClick={() => { setPlaying(false); setStep((current) => Math.max(0, Math.min(data.steps.length - 1, current + 1))); }} aria-label={copy.nextStep}>→</button>
+            <div className="progress" aria-label={`${copy.step} ${safeStep + 1} / ${data.steps.length}`}><i style={{ width: `${(safeStep / Math.max(1, data.steps.length - 1)) * 100}%` }} /></div>
+            <span>{copy.step} {safeStep + 1} / {data.steps.length}</span>
           </div>
         </div>
 
@@ -552,7 +575,7 @@ export default function Home() {
             <div className="panel-title"><span>{copy.timeline}</span><b>{raw.time}</b></div>
             <div className="timeline">
               {data.steps.map((item, index) => (
-                <button key={item.time} onClick={() => { setStep(index); setPlaying(false); }} className={index === step ? "current" : index < step ? "past" : ""}>
+                <button key={item.time} onClick={() => { setStep(index); setPlaying(false); }} className={index === safeStep ? "current" : index < safeStep ? "past" : ""}>
                   <i /> <span>{item.time}</span><b>{translate(item.label, language)}</b>
                 </button>
               ))}
