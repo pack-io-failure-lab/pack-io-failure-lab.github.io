@@ -495,7 +495,7 @@ export default function Home() {
   return (
     <main>
       <header className="topbar">
-        <div className="brand"><span className="brandmark">R</span><span>REER ROBOTICS</span></div>
+        <div className="brand"><img className="company-logo" src="/reer-robotics-logo.png" alt="REER Robotics" /></div>
         <div className="topbar-actions">
           <div className="context"><span className="live-dot" /> {copy.packLab} <span className="version">{copy.model}</span></div>
           <div className="language-switch" aria-label={language === "zh" ? "语言选择" : "Language selector"}>
